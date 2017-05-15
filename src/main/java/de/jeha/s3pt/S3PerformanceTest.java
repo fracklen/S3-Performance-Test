@@ -13,7 +13,21 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.Arrays;
+
 import java.util.concurrent.*;
+
+import org.apache.http.HttpEntity;
+import org.apache.http.HttpResponse;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.HttpClientBuilder;
+
+
+import com.google.gson.Gson;
 
 /**
  * @author jenshadlich@googlemail.com
@@ -36,6 +50,10 @@ public class S3PerformanceTest implements Callable<TestResult> {
     private final boolean useKeepAlive;
     private final boolean usePathStyleAccess;
     private final String keyFileName;
+    private final String kairosdbUrl;
+    private final String source;
+    private final String backend;
+    private final List<KairosdbPoint> pointBuffer;
 
     /**
      * @param accessKey      access key
@@ -51,11 +69,15 @@ public class S3PerformanceTest implements Callable<TestResult> {
      * @param signerOverride override the S3 signer
      * @param useKeepAlive   use TCP keep alive
      * @param keyFileName    name of file with object keys
+     * @param kairosdbUrl    Url of KairosDB for posting metrics
+     * @param source         source tag for metrics
+     * @param backend        backend tag for metrics
      */
     public S3PerformanceTest(String accessKey, String secretKey, String endpointUrl, String bucketName,
                              Operation operation, int threads, int n, int size, boolean useHttp, boolean useGzip,
                              String signerOverride, boolean useKeepAlive, boolean usePathStyleAccess,
-                             String keyFileName) {
+                             String keyFileName,
+                             String kairosdbUrl, String source, String backend) {
         this.accessKey = accessKey;
         this.secretKey = secretKey;
         this.endpointUrl = endpointUrl;
@@ -70,6 +92,10 @@ public class S3PerformanceTest implements Callable<TestResult> {
         this.useKeepAlive = useKeepAlive;
         this.usePathStyleAccess = usePathStyleAccess;
         this.keyFileName = keyFileName;
+        this.kairosdbUrl = kairosdbUrl;
+        this.source = source;
+        this.backend = backend;
+        this.pointBuffer = new ArrayList<KairosdbPoint>();
     }
 
     @Override
@@ -96,10 +122,12 @@ public class S3PerformanceTest implements Callable<TestResult> {
 
             List<OperationResult> operationResults = new ArrayList<>();
             for (Future<OperationResult> result : futureResults) {
-                operationResults.add(result.get());
+                OperationResult res = result.get();
+                operationResults.add(res);
             }
 
             testResult = TestResult.compute(operationResults);
+            pushResults(testResult);
 
         } catch (InterruptedException | ExecutionException e) {
             LOG.error("An error occurred", e);
@@ -150,9 +178,11 @@ public class S3PerformanceTest implements Callable<TestResult> {
     private AbstractOperation createOperation(Operation operation, AmazonS3 s3Client) {
         switch (operation) {
             case CLEAR_BUCKET:
-                return new ClearBucket(s3Client, bucketName, n);
+                return new ClearBucket(s3Client, bucketName, n, threads);
             case CREATE_BUCKET:
                 return new CreateBucket(s3Client, bucketName);
+            case DELETE_BUCKET:
+                return new DeleteBucket(s3Client, bucketName);
             case CREATE_KEY_FILE:
                 return new CreateKeyFile(s3Client, bucketName, n, keyFileName);
             case RANDOM_READ:
@@ -165,6 +195,73 @@ public class S3PerformanceTest implements Callable<TestResult> {
                 return new UploadAndRead(s3Client, bucketName, n, size);
             default:
                 throw new UnsupportedOperationException("Unknown operation: " + operation);
+        }
+    }
+
+    private void pushResults(TestResult testResult) {
+        int i = 0;
+        List<KairosdbPoint> points = new ArrayList<KairosdbPoint>();
+
+        Map<String, String> tags = new HashMap<String, String>();
+        tags.put("backend", "riak");
+        tags.put("op", operation.toString());
+        tags.put("size", operation.toString() + String.valueOf(size));
+        tags.put("source", source);
+        tags.put("backend", backend);
+        tags.put("threads", "T" + String.valueOf(threads));
+
+        pushPoint(new KairosdbPoint("core.engineering.s3.operation_time.avg",
+            System.currentTimeMillis(),
+            testResult.getAvg(),
+            tags));
+        pushPoint(new KairosdbPoint("core.engineering.s3.operation_time.min",
+            System.currentTimeMillis(),
+            testResult.getMin(),
+            tags));
+        pushPoint(new KairosdbPoint("core.engineering.s3.operation_time.max",
+            System.currentTimeMillis(),
+            testResult.getMax(),
+            tags));
+        pushPoint(new KairosdbPoint("core.engineering.s3.operation_time.p99",
+            System.currentTimeMillis(),
+            testResult.getP99(),
+            tags));
+        pushPoint(new KairosdbPoint("core.engineering.s3.operation_time.p95",
+            System.currentTimeMillis(),
+            testResult.getP95(),
+            tags));
+
+        pushPoint(new KairosdbPoint("core.engineering.s3.ops",
+            System.currentTimeMillis() + (i++),
+            testResult.getOps(),
+            tags));
+        pushPoint(null);
+    }
+
+    private void pushPoint(KairosdbPoint point) {
+        if (point != null) {
+            pointBuffer.add(point);
+            if (pointBuffer.size() < 100) {
+                return;
+            }
+        }
+        try {
+            String       postUrl       = kairosdbUrl + "/api/v1/datapoints";// put in your url
+            Gson         gson          = new Gson();
+            HttpClient   httpClient    = HttpClientBuilder.create().build();
+            HttpPost     post          = new HttpPost(postUrl);
+            StringEntity postingString = new StringEntity(gson.toJson(pointBuffer));//gson.tojson() converts your pojo to json
+            post.setEntity(postingString);
+            post.setHeader("Content-type", "application/json");
+            HttpResponse  response = httpClient.execute(post);
+        } catch (Exception ex) {
+            throw new RuntimeException(ex);
+            //handle exception here
+
+        } finally {
+            pointBuffer.clear();
+            //Deprecated
+            //httpClient.getConnectionManager().shutdown();
         }
     }
 

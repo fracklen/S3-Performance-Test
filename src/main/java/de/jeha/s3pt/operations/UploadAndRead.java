@@ -6,13 +6,17 @@ import com.amazonaws.services.s3.model.PutObjectRequest;
 import com.amazonaws.services.s3.model.S3Object;
 import de.jeha.s3pt.OperationResult;
 import de.jeha.s3pt.operations.util.RandomDataGenerator;
+import de.jeha.s3pt.utils.RandomGeneratedInputStream;
 import org.apache.commons.lang3.time.StopWatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.*;
+import java.security.MessageDigest;
 import java.util.UUID;
+import java.math.BigInteger;
 
 /**
  * @author jenshadlich@googlemail.com
@@ -38,15 +42,16 @@ public class UploadAndRead extends AbstractOperation {
         LOG.info("Upload: n={}, size={} byte", n, size);
 
         for (int i = 0; i < n; i++) {
-            final byte data[] = RandomDataGenerator.generate(size);
+            //final byte data[] = RandomDataGenerator.generate(size);
             final String key = UUID.randomUUID().toString();
             LOG.debug("Uploading object: {}", key);
 
             final ObjectMetadata objectMetadata = new ObjectMetadata();
-            objectMetadata.setContentLength(data.length);
-
+            objectMetadata.setContentLength(size);
+            RandomGeneratedInputStream uploadStream = new RandomGeneratedInputStream(size);
             PutObjectRequest putObjectRequest =
-                    new PutObjectRequest(bucket, key, new ByteArrayInputStream(data), objectMetadata);
+                    new PutObjectRequest(bucket, key, uploadStream, objectMetadata);
+
 
             StopWatch stopWatch = new StopWatch();
             stopWatch.start();
@@ -54,7 +59,15 @@ public class UploadAndRead extends AbstractOperation {
             s3Client.putObject(putObjectRequest);
 
             S3Object object = s3Client.getObject(bucket, key);
+
+
+
             try {
+                InputStream downloadStream = object.getObjectContent();
+                String downloadHash = calc(downloadStream);
+                if (downloadHash == "") {
+                    LOG.info("Inconsistent upload-read");
+                }
                 object.close();
             } catch (IOException e) {
                 LOG.warn("An exception occurred while trying to close object with key: {}", key);
@@ -71,5 +84,30 @@ public class UploadAndRead extends AbstractOperation {
         }
 
         return new OperationResult(getStats());
+    }
+
+    public static String calc(InputStream is) {
+        String output;
+        int read;
+        byte[] buffer = new byte[4096];
+
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            while ((read = is.read(buffer)) > 0) {
+                digest.update(buffer, 0, read);
+            }
+            byte[] hash = digest.digest();
+            BigInteger bigInt = new BigInteger(1, hash);
+            output = bigInt.toString(16);
+            while ( output.length() < 32 ) {
+                output = "0"+output;
+            }
+        }
+        catch (Exception e) {
+            e.printStackTrace(System.err);
+            return null;
+        }
+
+        return output;
     }
 }

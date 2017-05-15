@@ -68,6 +68,16 @@ public class Main {
     @Option(name = "--resultFileName", usage = "name of file with test results", hidden = true)
     private String resultFileName = null;
 
+    @Option(name = "--kairosdbUrl", usage = "Url for KairosDB")
+    private String kairosdbUrl = null;
+
+    @Option(name = "--source", usage = "Source tag for KairosDB")
+    private String source = null;
+
+    @Option(name = "--backend", usage = "Backend tag for KairosDB")
+    private String backend = null;
+
+
     private final List<String> commandLineArguments = new ArrayList<>();
 
     public static void main(String... args) throws IOException {
@@ -86,6 +96,8 @@ public class Main {
         try {
             addArgumentsFromEnvironment("--accessKey", "AWS_ACCESS_KEY");
             addArgumentsFromEnvironment("--secretKey", "AWS_SECRET_KEY");
+            addArgumentsFromEnvironment("--source", "SOURCE");
+            addArgumentsFromEnvironment("--backend", "BACKEND");
 
             parser.parseArgument(commandLineArguments);
 
@@ -120,7 +132,10 @@ public class Main {
                 signerOverride,
                 useKeepAlive,
                 usePathStyleAccess,
-                keyFileName
+                keyFileName,
+                kairosdbUrl,
+                source,
+                backend
         ).call();
 
         stopWatch.stop();
